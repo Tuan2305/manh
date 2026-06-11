@@ -1,29 +1,29 @@
 ﻿Nhóm,Chỉ số,Giá trị
-Metrics Tổng Quan,Accuracy,0.7867
-Metrics Tổng Quan,Precision (macro),0.779
-Metrics Tổng Quan,Recall (macro),0.7842
-Metrics Tổng Quan,F1-Score (macro),0.7795
-Metrics Tổng Quan,Precision (weighted),0.7919
-Metrics Tổng Quan,Recall (weighted),0.7867
-Metrics Tổng Quan,F1-Score (weighted),0.7874
-Per-Class (Giảm mạnh),precision,0.85
-Per-Class (Giảm mạnh),recall,0.7391
-Per-Class (Giảm mạnh),f1-score,0.7907
-Per-Class (Giảm nhẹ),precision,0.6909
-Per-Class (Giảm nhẹ),recall,0.8261
-Per-Class (Giảm nhẹ),f1-score,0.7525
-Per-Class (Bình thường),precision,0.7846
-Per-Class (Bình thường),recall,0.8095
-Per-Class (Bình thường),f1-score,0.7969
-Per-Class (Tăng nhẹ),precision,0.8611
-Per-Class (Tăng nhẹ),recall,0.8378
-Per-Class (Tăng nhẹ),f1-score,0.8493
-Per-Class (Tăng mạnh),precision,0.7083
-Per-Class (Tăng mạnh),recall,0.7083
-Per-Class (Tăng mạnh),f1-score,0.7083
-Backtesting,total_return_strategy,-0.2441
-Backtesting,total_return_bh,0.3991
-Backtesting,sharpe_strategy,-0.6286
-Backtesting,sharpe_bh,0.9956
-Backtesting,max_drawdown_strategy,-0.2983
-Backtesting,max_drawdown_bh,-0.221
+Metrics Tổng Quan,Accuracy,0.2618
+Metrics Tổng Quan,Precision (macro),0.1536
+Metrics Tổng Quan,Recall (macro),0.2223
+Metrics Tổng Quan,F1-Score (macro),0.1425
+Metrics Tổng Quan,Precision (weighted),0.1828
+Metrics Tổng Quan,Recall (weighted),0.2618
+Metrics Tổng Quan,F1-Score (weighted),0.1664
+Per-Class (Giảm mạnh),precision,0.1918
+Per-Class (Giảm mạnh),recall,0.2258
+Per-Class (Giảm mạnh),f1-score,0.2074
+Per-Class (Giảm nhẹ),precision,0.2917
+Per-Class (Giảm nhẹ),recall,0.0467
+Per-Class (Giảm nhẹ),f1-score,0.0805
+Per-Class (Bình thường),precision,0.0
+Per-Class (Bình thường),recall,0.0
+Per-Class (Bình thường),f1-score,0.0
+Per-Class (Tăng nhẹ),precision,0.0
+Per-Class (Tăng nhẹ),recall,0.0
+Per-Class (Tăng nhẹ),f1-score,0.0
+Per-Class (Tăng mạnh),precision,0.2844
+Per-Class (Tăng mạnh),recall,0.8392
+Per-Class (Tăng mạnh),f1-score,0.4248
+Backtesting,total_return_strategy,1.4514
+Backtesting,total_return_bh,0.2105
+Backtesting,sharpe_strategy,0.9483
+Backtesting,sharpe_bh,0.4304
+Backtesting,max_drawdown_strategy,-0.3846
+Backtesting,max_drawdown_bh,-0.3846

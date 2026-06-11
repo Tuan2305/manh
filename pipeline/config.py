@@ -9,9 +9,8 @@ GEMINI_API_KEY = "AIzaSyBxKMm7B_j2s1DkD2ZsCYYu5PSMDl07UW0"
 #
 # Giá trị này quyết định: nhãn xu thế được tính dựa trên return
 # trong HORIZON phiên tiếp theo.
-HORIZON = 5
+HORIZON = 1
 
 HORIZON_LABEL = {5: "ngắn hạn (5 phiên)", 20: "trung hạn (20 phiên)", 60: "dài hạn (60 phiên)"}
 
-# ── Đường dẫn dữ liệu ────────────────────────────────────────────────────────
 RAW_CSV_PATH = r"C:\TUAN\code\python\manh\TSLA.csv"

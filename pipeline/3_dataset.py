@@ -8,17 +8,17 @@ import numpy as np
 import os
 
 DATA_DIR  = "pipeline_data"
-IN_PATH   = os.path.join(DATA_DIR, "tsla_with_fuzzy.csv")
+IN_PATH   = os.path.join(DATA_DIR, "tsla_processed.csv")
 
 SEQ_LEN   = 30       # dùng 30 phiên liên tiếp làm 1 mẫu đầu vào
 TRAIN_PCT = 0.70     # 70% train
 VAL_PCT   = 0.15     # 15% validation  → 15% test
 
-# Các feature đưa vào LSTM: giá + chỉ báo kỹ thuật + fuzzy features
+# Các feature đưa vào LSTM: chỉ giá + chỉ báo kỹ thuật
+# sentiment/fuzzy_label bị loại vì 99% dữ liệu lịch sử dùng fallback 0.5 → nhiễu
 FEATURE_COLS = [
     "Close", "High", "Low", "Open", "Volume",
     "RSI", "ATR", "BB_width", "BB_pct",
-    "sentiment", "fuzzy_label",            # đầu ra từ hệ thống mờ
 ]
 
 
