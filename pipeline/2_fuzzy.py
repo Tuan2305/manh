@@ -1,43 +1,35 @@
 # 2_fuzzy.py — Hệ thống suy luận mờ (Fuzzy Inference System)
 #
-# Input:  tsla_processed.csv (từ bước 1)
-# Output: tsla_with_fuzzy.csv (thêm cột sentiment, fuzzy_label)
+# Input:  pipeline_data/tsla_processed.csv  (từ bước 1, raw values)
+# Output: pipeline_data/tsla_with_fuzzy.csv (thêm sentiment + fuzzy_label + fuzzy_0..4)
 #
 # Quy trình:
-#   1. Lấy tin tức TSLA từ yfinance (có cache để tránh gọi lại)
-#   2. Phân tích cảm xúc (sentiment) bằng Gemini API
-#   3. Chạy hệ thống suy luận mờ IF-THEN để gán fuzzy_label (0-4)
+#   1. Lấy tin tức TSLA từ yfinance + phân tích cảm xúc bằng Gemini API (có cache)
+#   2. Chạy hệ suy luận mờ IF-THEN với 4 biến đầu vào:
+#        RSI (0-100), ATR_pct = ATR/Close*100 (%), BB_position (0-1), sentiment (0-1)
+#   3. Sinh ra fuzzy_label (0-4) và fuzzy_score (vector 5 chiều, tổng = 1)
 
 import os
 import sys
-import time
 import warnings
 import numpy as np
 import pandas as pd
-import yfinance as yf
-from google import genai
 
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import GEMINI_API_KEY
 
-DATA_DIR        = "pipeline_data"
-IN_PATH         = os.path.join(DATA_DIR, "tsla_processed.csv")
-OUT_PATH        = os.path.join(DATA_DIR, "tsla_with_fuzzy.csv")
-NEWS_CACHE_PATH = os.path.join(DATA_DIR, "news_sentiment_cache.csv")
+DATA_DIR = "pipeline_data"
+IN_PATH  = os.path.join(DATA_DIR, "tsla_processed.csv")
+OUT_PATH = os.path.join(DATA_DIR, "tsla_with_fuzzy.csv")
 
-TREND_NAMES = ["Giảm mạnh", "Giảm nhẹ", "Bình thường", "Tăng nhẹ", "Tăng mạnh"]
-
-# ── Gemini setup ──────────────────────────────────────────────────────────────
-_gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-GEMINI_MODEL   = "gemini-2.0-flash"
+TREND_NAMES = ["Giam manh", "Giam nhe", "Binh thuong", "Tang nhe", "Tang manh"]
 
 
 # ── Hàm thành viên (Membership Functions) ────────────────────────────────────
 
 def trimf(x: float, a: float, b: float, c: float) -> float:
-    """Hàm tam giác: tăng từ a→b, giảm từ b→c."""
+    """Hàm tam giác: tăng tuyến tính a→b, giảm tuyến tính b→c."""
     if x <= a or x >= c:
         return 0.0
     if x <= b:
@@ -56,269 +48,197 @@ def trapmf(x: float, a: float, b: float, c: float, d: float) -> float:
     return (d - x) / (d - c + 1e-9)
 
 
-# ── Fuzzify các biến đầu vào ──────────────────────────────────────────────────
-
-def fuzzify_sentiment(s: float) -> dict:
-    """s ∈ [0, 1]: 0 = tiêu cực, 0.5 = trung lập, 1 = tích cực."""
-    return {
-        "negative": trapmf(s, 0.0, 0.0, 0.30, 0.50),
-        "neutral":  trimf( s, 0.25, 0.5, 0.75),
-        "positive": trapmf(s, 0.45, 0.60, 1.0, 1.0),
-    }
-
-
-def fuzzify_volume(v: float) -> dict:
-    """v ∈ [0, 1] sau MinMax scale."""
-    return {
-        "low":    trapmf(v, 0.0, 0.0, 0.20, 0.40),
-        "medium": trimf( v, 0.25, 0.5, 0.75),
-        "high":   trapmf(v, 0.45, 0.60, 1.0, 1.0),
-    }
-
+# ── Fuzzify 4 biến đầu vào ────────────────────────────────────────────────────
 
 def fuzzify_rsi(r: float) -> dict:
-    """r ∈ [0, 1] sau MinMax scale (tương ứng RSI 0-100)."""
+    """RSI thật trong [0, 100]. Cửa sổ 14 phiên."""
     return {
-        "oversold":   trapmf(r, 0.0, 0.0, 0.30, 0.45),
-        "neutral":    trimf( r, 0.30, 0.5, 0.70),
-        "overbought": trapmf(r, 0.55, 0.70, 1.0, 1.0),
+        "oversold":   trapmf(r,  0,  0, 30, 45),
+        "neutral":    trimf( r, 30, 50, 70),
+        "overbought": trapmf(r, 55, 70, 100, 100),
     }
 
 
-# ── Luật suy luận mờ IF-THEN ──────────────────────────────────────────────────
-#
-# Mỗi luật: (sentiment_key, volume_key, rsi_key) → trend_label
+def fuzzify_atr_pct(a: float) -> dict:
+    """ATR_pct = ATR/Close*100 (%). TSLA thường: low<3%, medium 3-8%, high>7%."""
+    return {
+        "low":    trapmf(a, 0,  0,  2,  4),
+        "medium": trimf( a, 3,  5,  8),
+        "high":   trapmf(a, 6, 10, 20, 20),
+    }
+
+
+def fuzzify_bb_position(b: float) -> dict:
+    """BB_position = (Close - BB_lower)/(BB_upper - BB_lower) ∈ [0,1]."""
+    return {
+        "lower":  trapmf(b, 0.0, 0.0, 0.35, 0.50),
+        "middle": trimf( b, 0.30, 0.50, 0.70),
+        "upper":  trapmf(b, 0.55, 0.65, 1.0, 1.0),
+    }
+
+
+def fuzzify_sentiment(s: float) -> dict:
+    """sentiment ∈ [0,1]: 0=tiêu cực, 0.5=trung lập, 1=tích cực."""
+    return {
+        "negative": trapmf(s, 0.0, 0.0, 0.30, 0.50),
+        "neutral":  trimf( s, 0.25, 0.50, 0.75),
+        "positive": trapmf(s, 0.45, 0.65, 1.0, 1.0),
+    }
+
+
+# ── Bộ luật IF-THEN ───────────────────────────────────────────────────────────
+# Mỗi luật: (sentiment_key, rsi_key, atr_key, bb_key) → label
 # Label: 0=Giảm mạnh, 1=Giảm nhẹ, 2=Bình thường, 3=Tăng nhẹ, 4=Tăng mạnh
 
 RULES = [
-    # --- Cảm xúc Tích cực ---
-    ("positive", "high",   "overbought", 4),
-    ("positive", "high",   "neutral",    4),
-    ("positive", "medium", "overbought", 4),
-    ("positive", "medium", "neutral",    3),
-    ("positive", "low",    "neutral",    3),
-    ("positive", "medium", "oversold",   3),
-    ("positive", "high",   "oversold",   3),
-    ("positive", "low",    "overbought", 3),
-    ("positive", "low",    "oversold",   3),
+    # ── Tăng mạnh (4) ─────────────────────────────────────────────────────────
+    # sentiment=pos AND RSI=overbought AND BB=upper → tín hiệu tăng mạnh nhất (Rule 1)
+    ("positive", "overbought", "high",   "upper",  4),
+    ("positive", "overbought", "medium", "upper",  4),
+    ("positive", "neutral",    "high",   "upper",  4),
+    ("positive", "overbought", "low",    "upper",  4),
 
-    # --- Cảm xúc Trung lập ---
-    ("neutral",  "medium", "neutral",    2),
-    ("neutral",  "low",    "neutral",    2),
-    ("neutral",  "high",   "neutral",    2),
-    ("neutral",  "low",    "oversold",   3),
-    ("neutral",  "medium", "oversold",   3),
-    ("neutral",  "high",   "oversold",   2),
-    ("neutral",  "low",    "overbought", 1),
-    ("neutral",  "medium", "overbought", 1),
-    ("neutral",  "high",   "overbought", 0),
+    # ── Tăng nhẹ (3) ──────────────────────────────────────────────────────────
+    # sentiment=pos AND ATR=high AND RSI=neutral (Rule 4 từ báo cáo)
+    ("positive", "neutral",    "high",   "middle", 3),
+    ("positive", "neutral",    "medium", "upper",  3),
+    ("positive", "neutral",    "medium", "middle", 3),
+    ("positive", "neutral",    "low",    "upper",  3),
+    ("positive", "neutral",    "low",    "middle", 3),
+    # Oversold + positive → kỳ vọng phục hồi
+    ("positive", "oversold",   "high",   "lower",  3),
+    ("positive", "oversold",   "medium", "lower",  3),
+    ("positive", "oversold",   "low",    "lower",  3),
+    ("positive", "oversold",   "medium", "middle", 3),
+    # Neutral sentiment + oversold + BB lower → tín hiệu phục hồi kỹ thuật
+    ("neutral",  "oversold",   "medium", "lower",  3),
+    ("neutral",  "oversold",   "low",    "lower",  3),
 
-    # --- Cảm xúc Tiêu cực ---
-    ("negative", "high",   "overbought", 0),
-    ("negative", "high",   "neutral",    0),
-    ("negative", "medium", "overbought", 0),
-    ("negative", "medium", "neutral",    1),
-    ("negative", "low",    "neutral",    1),
-    ("negative", "low",    "overbought", 1),
-    ("negative", "medium", "oversold",   2),
-    ("negative", "high",   "oversold",   1),
-    ("negative", "low",    "oversold",   2),
+    # ── Bình thường (2) ───────────────────────────────────────────────────────
+    # sentiment=neutral AND ATR=low AND RSI=neutral (Rule 3 từ báo cáo)
+    ("neutral",  "neutral",    "low",    "middle", 2),
+    ("neutral",  "neutral",    "medium", "middle", 2),
+    ("neutral",  "neutral",    "high",   "middle", 2),
+    ("neutral",  "neutral",    "low",    "lower",  2),
+    ("neutral",  "neutral",    "low",    "upper",  2),
+    # negative + oversold → mixed signal, không rõ xu hướng
+    ("negative", "oversold",   "low",    "lower",  2),
+    ("negative", "oversold",   "low",    "middle", 2),
+    # positive + oversold + high atr + overbought → quá mua, có thể điều chỉnh
+    ("positive", "overbought", "high",   "middle", 2),
+
+    # ── Giảm nhẹ (1) ──────────────────────────────────────────────────────────
+    # sentiment=neg AND ATR=high AND RSI=neutral (Rule 5 từ báo cáo)
+    ("negative", "neutral",    "high",   "middle", 1),
+    ("negative", "neutral",    "medium", "middle", 1),
+    ("negative", "neutral",    "low",    "middle", 1),
+    ("negative", "neutral",    "medium", "upper",  1),
+    ("negative", "neutral",    "low",    "upper",  1),
+    # Overbought + neutral sentiment → pullback nhẹ
+    ("neutral",  "overbought", "medium", "upper",  1),
+    ("neutral",  "overbought", "low",    "upper",  1),
+    ("neutral",  "overbought", "medium", "middle", 1),
+    # negative + oversold + atr medium/high → downtrend chưa đảo chiều
+    ("negative", "oversold",   "medium", "lower",  1),
+    ("negative", "oversold",   "high",   "lower",  1),
+
+    # ── Giảm mạnh (0) ─────────────────────────────────────────────────────────
+    # sentiment=neg AND RSI=oversold AND BB=lower (Rule 2 từ báo cáo)
+    ("negative", "oversold",   "high",   "middle", 0),
+    ("negative", "neutral",    "high",   "lower",  0),
+    ("negative", "overbought", "high",   "upper",  0),
+    ("negative", "overbought", "medium", "upper",  0),
+    ("negative", "overbought", "high",   "middle", 0),
+    ("negative", "neutral",    "high",   "upper",  0),
 ]
 
 
-def fuzzy_inference(sentiment: float, volume: float, rsi: float) -> int:
+# ── Hàm suy luận mờ chính ────────────────────────────────────────────────────
+
+def fuzzy_inference(rsi: float, atr_pct: float, bb_pos: float,
+                    sentiment: float) -> tuple:
     """
-    Chạy suy luận mờ, trả về nhãn xu thế (0-4) có firing strength cao nhất.
-    Không cần defuzzify vì bài toán phân loại 5 nhãn định sẵn.
+    Chạy suy luận mờ IF-THEN với 4 biến đầu vào.
+
+    Returns:
+        fuzzy_label (int 0-4): nhãn có firing strength cao nhất
+        fuzzy_score (list[5]): vector mức kích hoạt đã chuẩn hóa (tổng = 1)
     """
-    fs = fuzzify_sentiment(sentiment)
-    fv = fuzzify_volume(volume)
     fr = fuzzify_rsi(rsi)
+    fa = fuzzify_atr_pct(atr_pct)
+    fb = fuzzify_bb_position(bb_pos)
+    fs = fuzzify_sentiment(sentiment)
 
     firing = np.zeros(5)
-    for s_key, v_key, r_key, label in RULES:
-        strength = min(fs[s_key], fv[v_key], fr[r_key])   # AND = min
-        firing[label] = max(firing[label], strength)        # OR  = max
+    for s_key, r_key, a_key, b_key, label in RULES:
+        strength = min(fs[s_key], fr[r_key], fa[a_key], fb[b_key])   # AND = min
+        firing[label] = max(firing[label], strength)                   # OR  = max
 
-    return int(np.argmax(firing))
+    # Khi không có luật nào kích hoạt → mặc định Bình thường (label=2)
+    if firing.max() == 0:
+        firing[2] = 1.0
 
+    fuzzy_label = int(np.argmax(firing))
+    total = firing.sum()
+    fuzzy_score = (firing / total).tolist()   # chuẩn hóa → tổng = 1
 
-# ── Thu thập tin tức từ yfinance ──────────────────────────────────────────────
-
-def fetch_news_yfinance(ticker: str = "TSLA") -> dict:
-    """
-    Lấy tin tức gần đây của TSLA từ yfinance.
-    Trả về dict {date_str: [title1, title2, ...]}
-
-    Lưu ý: yfinance chỉ cung cấp tin tức vài ngày gần nhất.
-    Các ngày lịch sử (2010-2023) sẽ không có tin tức → dùng neutral fallback.
-    """
-    try:
-        t = yf.Ticker(ticker)
-        raw_news = t.news
-        date_news: dict = {}
-
-        for item in raw_news:
-            if not isinstance(item, dict):
-                continue
-
-            # Tương thích nhiều phiên bản yfinance
-            title     = (item.get("title")
-                         or item.get("content", {}).get("title", ""))
-            timestamp = (item.get("providerPublishTime")
-                         or item.get("content", {}).get("pubDate", ""))
-
-            if not title:
-                continue
-
-            # Chuyển timestamp → date string YYYY-MM-DD
-            if isinstance(timestamp, (int, float)) and timestamp > 0:
-                from datetime import datetime, timezone
-                date_str = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%Y-%m-%d")
-            elif isinstance(timestamp, str) and len(timestamp) >= 10:
-                date_str = timestamp[:10]
-            else:
-                continue
-
-            date_news.setdefault(date_str, []).append(title.strip())
-
-        total_titles = sum(len(v) for v in date_news.values())
-        print(f"  yfinance: {total_titles} tiêu đề từ {len(date_news)} ngày")
-        return date_news
-
-    except Exception as exc:
-        print(f"  [WARN] Không thể lấy tin tức từ yfinance: {exc}")
-        return {}
-
-
-# ── Phân tích cảm xúc bằng Gemini API ────────────────────────────────────────
-
-def analyze_sentiment_gemini(headlines: list) -> float:
-    """
-    Gửi tối đa 5 tiêu đề tin tức lên Gemini, nhận về điểm cảm xúc [0.0, 1.0].
-      0.0 = rất tiêu cực
-      0.5 = trung lập
-      1.0 = rất tích cực
-    Trả về 0.5 nếu không có tin tức hoặc Gemini lỗi.
-    """
-    if not headlines:
-        return 0.5
-
-    sample = headlines[:5]
-    headlines_text = "\n".join(f"- {h}" for h in sample)
-
-    prompt = (
-        "Bạn là chuyên gia phân tích tài chính. Hãy đánh giá cảm xúc chung "
-        "của các tiêu đề tin tức sau đây về cổ phiếu Tesla (TSLA).\n\n"
-        f"Tiêu đề:\n{headlines_text}\n\n"
-        "Trả lời bằng MỘT số thực duy nhất trong khoảng [0.0, 1.0]:\n"
-        "  0.0 = rất tiêu cực (tin xấu, kỳ vọng giá giảm mạnh)\n"
-        "  0.5 = trung lập\n"
-        "  1.0 = rất tích cực (tin tốt, kỳ vọng giá tăng mạnh)\n\n"
-        "Không giải thích, chỉ trả về số."
-    )
-
-    try:
-        response = _gemini_client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt
-        )
-        raw = response.text.strip().split()[0]   # lấy token đầu tiên phòng model thêm chữ
-        score = float(raw)
-        return float(np.clip(score, 0.0, 1.0))
-    except Exception as exc:
-        print(f"  [WARN] Gemini error: {exc}")
-        return 0.5
-
-
-# ── Cache sentiment theo ngày ─────────────────────────────────────────────────
-
-def load_sentiment_cache() -> dict:
-    """Đọc cache CSV → {date_str: sentiment_score}."""
-    if not os.path.exists(NEWS_CACHE_PATH):
-        return {}
-    df = pd.read_csv(NEWS_CACHE_PATH)
-    df["Date"] = df["Date"].astype(str).str[:10]
-    return dict(zip(df["Date"], df["sentiment"].astype(float)))
-
-
-def save_sentiment_cache(cache: dict) -> None:
-    """Lưu dict cache → CSV."""
-    rows = [{"Date": k, "sentiment": v} for k, v in sorted(cache.items())]
-    pd.DataFrame(rows).to_csv(NEWS_CACHE_PATH, index=False)
-
-
-def build_sentiment_series(dates: pd.Series) -> pd.Series:
-    """
-    Với mỗi ngày trong `dates`:
-      1. Nếu đã có trong cache → dùng luôn.
-      2. Nếu có tin tức (yfinance) → gọi Gemini, lưu cache.
-      3. Không có tin tức → 0.5 (trung lập), lưu cache.
-
-    Trả về Series sentiment có cùng index với `dates`.
-    """
-    cache = load_sentiment_cache()
-    date_strs = dates.dt.strftime("%Y-%m-%d").tolist()
-
-    # Chỉ gọi yfinance khi còn ngày chưa có trong cache
-    missing = [d for d in date_strs if d not in cache]
-    if missing:
-        print(f"  {len(missing)} ngày chưa có sentiment → lấy tin từ yfinance...")
-        date_news = fetch_news_yfinance("TSLA")
-
-        new_count = 0
-        for date_str in missing:
-            headlines = date_news.get(date_str, [])
-            if headlines:
-                score = analyze_sentiment_gemini(headlines)
-                time.sleep(0.3)   # tránh rate-limit Gemini
-            else:
-                score = 0.5       # neutral fallback cho ngày không có tin
-            cache[date_str] = score
-            new_count += 1
-
-        save_sentiment_cache(cache)
-        has_news = sum(1 for d in missing if date_news.get(d))
-        print(f"  Đã phân tích Gemini: {has_news} ngày có tin, "
-              f"{new_count - has_news} ngày dùng neutral fallback")
-        print(f"  Đã lưu cache: {NEWS_CACHE_PATH}")
-    else:
-        print(f"  Toàn bộ {len(date_strs)} ngày đã có trong cache.")
-
-    return pd.Series([cache[d] for d in date_strs], index=dates.index, name="sentiment")
+    return fuzzy_label, fuzzy_score
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("\n" + "=" * 55)
-    print("  [2/5] HỆ THỐNG SUY LUẬN MỜ (FUZZY INFERENCE)")
+    print("  [2/4] HE THONG SUY LUAN MO (FUZZY INFERENCE)")
     print("=" * 55)
 
     df = pd.read_csv(IN_PATH, parse_dates=["Date"])
-    print(f"  Đọc: {len(df):,} dòng từ {IN_PATH}")
+    print(f"  Doc: {len(df):,} dong tu {IN_PATH}")
 
-    # Bước 1: Lấy sentiment thật từ Gemini + yfinance (có cache)
-    print("\n  --- Bước 1: Phân tích cảm xúc tin tức (Gemini) ---")
-    df["sentiment"] = build_sentiment_series(df["Date"])
+    # sentiment da duoc tinh o buoc 1 tu momentum gia 5 ngay
+    if "sentiment" not in df.columns:
+        raise ValueError("Khong tim thay cot 'sentiment' trong file. Chay lai buoc 1 truoc.")
 
-    # Bước 2: Chạy suy luận mờ cho từng phiên
-    print("\n  --- Bước 2: Suy luận mờ IF-THEN ---")
-    fuzzy_labels = [
-        fuzzy_inference(row["sentiment"], row["Volume"], row["RSI"])
-        for _, row in df.iterrows()
-    ]
+    sent_mean = df["sentiment"].mean()
+    sent_std  = df["sentiment"].std()
+    print(f"  Sentiment proxy: mean={sent_mean:.3f}  std={sent_std:.3f}")
+
+    # Tinh ATR_pct = ATR/Close * 100 (%) de fuzzify
+    df["ATR_pct"] = df["ATR"] / (df["Close"] + 1e-9) * 100.0
+
+    print(f"\n  Suy luan mo IF-THEN ({len(RULES)} luat, 4 bien dau vao)...")
+    fuzzy_labels = []
+    fuzzy_scores = []
+
+    for _, row in df.iterrows():
+        label, score = fuzzy_inference(
+            rsi       = float(row["RSI"]),
+            atr_pct   = float(row["ATR_pct"]),
+            bb_pos    = float(row["BB_position"]),
+            sentiment = float(row["sentiment"]),
+        )
+        fuzzy_labels.append(label)
+        fuzzy_scores.append(score)
+
     df["fuzzy_label"] = fuzzy_labels
 
-    # Lưu kết quả
-    df.to_csv(OUT_PATH, index=False)
-    print(f"\n  Đã lưu: {OUT_PATH}")
+    scores_arr = np.array(fuzzy_scores)
+    for i in range(5):
+        df[f"fuzzy_{i}"] = scores_arr[:, i]
 
-    print(f"\n  Phân phối fuzzy_label:")
+    df.drop(columns=["ATR_pct"], inplace=True)
+
+    df.to_csv(OUT_PATH, index=False)
+    print(f"  Da luu: {OUT_PATH}")
+
+    print(f"\n  Phan phoi fuzzy_label:")
     for i, name in enumerate(TREND_NAMES):
         cnt = int((df["fuzzy_label"] == i).sum())
         pct = cnt / len(df) * 100
-        print(f"     {name:<15} {cnt:>5} phiên  ({pct:.1f}%)")
+        print(f"     {name:<15} {cnt:>5} phien  ({pct:.1f}%)")
 
+    score_sum = scores_arr.sum(axis=1)
+    print(f"\n  fuzzy_score tong moi hang: Min={score_sum.min():.4f}  Max={score_sum.max():.4f}  Mean={score_sum.mean():.4f}")
     print("=" * 55)
 
 

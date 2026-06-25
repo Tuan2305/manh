@@ -23,7 +23,8 @@ def run_backtesting(y_true, y_pred, prices_df):
     closes = prices_df["Close"].values
 
     real_returns = np.diff(closes[:n + 1]) / closes[:n]
-    signals      = np.where(y_pred[:n] >= 3, 1, np.where(y_pred[:n] <= 1, -1, 0))
+    # 3 nhãn: 0=Giảm→Bán(-1), 1=Giữ→Hold(0), 2=Tăng→Mua(+1)
+    signals      = np.where(y_pred[:n] == 2, 1, np.where(y_pred[:n] == 0, -1, 0))
 
     strategy_returns = signals * real_returns
     strategy_cum     = np.cumprod(1 + strategy_returns)
@@ -102,10 +103,10 @@ def run_backtesting(y_true, y_pred, prices_df):
     import numpy as _np
     ax3 = fig.add_subplot(gs[2])
     ax3.set_facecolor("#1a1d27")
-    x     = _np.arange(5)
+    x     = _np.arange(3)
     width = 0.35
-    tc = [_np.sum(y_true[:n] == i) for i in range(5)]
-    pc = [_np.sum(y_pred[:n] == i) for i in range(5)]
+    tc = [_np.sum(y_true[:n] == i) for i in range(3)]
+    pc = [_np.sum(y_pred[:n] == i) for i in range(3)]
     b1 = ax3.bar(x - width/2, tc, width, label="Thực tế",  color="#4fc3f7", alpha=0.8, edgecolor="none")
     b2 = ax3.bar(x + width/2, pc, width, label="Dự đoán",  color="#ffd54f", alpha=0.8, edgecolor="none")
     for bar in [*b1, *b2]:
